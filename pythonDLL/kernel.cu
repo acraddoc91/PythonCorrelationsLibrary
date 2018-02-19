@@ -17,6 +17,12 @@
 
 #include <omp.h>
 
+//Define integers explicitly to prevent problems on different platforms
+#define int8 __int8
+#define int16 __int16
+#define int32 __int32
+#define int64 __int64
+
 const int max_tags_length = 200000;
 const int max_clock_tags_length = 5000;
 const int max_channels = 3;
@@ -29,31 +35,31 @@ const int shared_mem_size = 4;
 
 struct shotData {
 	bool file_load_completed;
-	std::vector<short int> channel_list;
-	std::map<short int, short int> channel_map;
-	std::vector<long long int> start_tags;
-	std::vector<long long int> end_tags;
-	std::vector<long long int> photon_tags;
-	std::vector<long long int> clock_tags;
-	std::vector<std::vector<long long int>> sorted_photon_tags;
-	std::vector<std::vector<long int>> sorted_photon_bins;
-	std::vector<std::vector<long long int>> sorted_clock_tags;
-	std::vector<std::vector<long int>> sorted_clock_bins;
-	std::vector<long int> sorted_photon_tag_pointers;
-	std::vector<long int> sorted_clock_tag_pointers;
+	std::vector<int16> channel_list;
+	std::map<int16, int16> channel_map;
+	std::vector<int64> start_tags;
+	std::vector<int64> end_tags;
+	std::vector<int64> photon_tags;
+	std::vector<int64> clock_tags;
+	std::vector<std::vector<int64>> sorted_photon_tags;
+	std::vector<std::vector<int32>> sorted_photon_bins;
+	std::vector<std::vector<int64>> sorted_clock_tags;
+	std::vector<std::vector<int32>> sorted_clock_bins;
+	std::vector<int32> sorted_photon_tag_pointers;
+	std::vector<int32> sorted_clock_tag_pointers;
 
-	shotData() : sorted_photon_tags(max_channels, std::vector<long long int>(max_tags_length, 0)), sorted_photon_bins(max_channels, std::vector<long int>(max_tags_length, 0)), sorted_photon_tag_pointers(max_channels, 0), sorted_clock_tags(2, std::vector<long long int>(max_clock_tags_length, 0)), sorted_clock_bins(2, std::vector<long int>(max_clock_tags_length, 0)), sorted_clock_tag_pointers(2, 0) {}
+	shotData() : sorted_photon_tags(max_channels, std::vector<int64>(max_tags_length, 0)), sorted_photon_bins(max_channels, std::vector<int32>(max_tags_length, 0)), sorted_photon_tag_pointers(max_channels, 0), sorted_clock_tags(2, std::vector<int64>(max_clock_tags_length, 0)), sorted_clock_bins(2, std::vector<int32>(max_clock_tags_length, 0)), sorted_clock_tag_pointers(2, 0) {}
 };
 
 struct gpuData {
-	long int *coinc_gpu;
-	long int *photon_bins_gpu;
-	long int *start_and_end_clocks_gpu;
+	int32 *coinc_gpu;
+	int32 *photon_bins_gpu;
+	int32 *start_and_end_clocks_gpu;
 	int *max_bin_gpu, *pulse_spacing_gpu, *max_pulse_distance_gpu, *photon_bins_length_gpu;
 	int *offset_gpu;
 };
 
-__global__ void calculateCoincidencesGPU_g2(long int *coinc, long int *photon_bins, long int *start_and_end_clocks, int *max_bin, int *pulse_spacing, int *max_pulse_distance, int *offset, int *photon_bins_length, int num_channels, int shot_file_num) {
+__global__ void calculateCoincidencesGPU_g2_old(int32 *coinc, int32 *photon_bins, int32 *start_and_end_clocks, int *max_bin, int *pulse_spacing, int *max_pulse_distance, int *offset, int *photon_bins_length, int num_channels, int shot_file_num) {
 	//Get numerator step to work on
 	int id = threadIdx.x;
 	int block = blockIdx.x;
@@ -89,108 +95,63 @@ __global__ void calculateCoincidencesGPU_g2(long int *coinc, long int *photon_bi
 	}
 }
 
-__global__ void calculateCoincidencesGPU_g2_test2(long int *coinc, long int *photon_bins, long int *start_and_end_clocks, int *max_bin, int *pulse_spacing, int *max_pulse_distance, int *offset, int *photon_bins_length, int num_channels, int shot_file_num) {
+__global__ void calculateCoincidencesGPU_g2(int32 *coinc, int32 *photon_bins, int32 *start_and_end_clocks, int32 *max_bin, int32 *pulse_spacing, int32 *max_pulse_distance, int32 *offset, int32 *photon_bins_length, int8 num_channels, int32 shot_file_num) {
 	//Get numerator step to work on
-	int id = threadIdx.x;
-	int block = blockIdx.x;
-	int block_size = blockDim.x;
+	int16 id = threadIdx.x;
+	int32 block = blockIdx.x;
+	int16 block_size = blockDim.x;
 
-	//Check we're not calculating something out of range
-	if (block * block_size + id < ((*max_bin * 2 + 1) + (*max_pulse_distance * 2))) {
-		int pulse_shift_measurment = (block * block_size + id >= *max_bin * 2 + 1) && (block * block_size + id < *max_bin * 2 + 1 + (*max_pulse_distance * 2));
-		int pulse_shift = ((block * block_size + id - (*max_bin * 2 + 1) - (*max_pulse_distance)) + ((block * block_size + id - (*max_bin * 2 + 1) - (*max_pulse_distance)) >= 0)) * (pulse_shift_measurment);
-		int tau = (block * block_size + id - (*max_bin)) * (!pulse_shift_measurment);
-		tau += pulse_shift * (*pulse_spacing);
-		for (int channel_1 = 0; channel_1 < num_channels; channel_1++) {
-			for (int channel_2 = channel_1 + 1; channel_2 < num_channels; channel_2++) {
-				int i = 0;
-				int j = 0;
-				int running_tot = 0;
-				while ((i < photon_bins_length[channel_1 + shot_file_num * max_channels]) && (j < photon_bins_length[channel_2 + shot_file_num * max_channels])) {
-					//Check if we're outside the window of interest
-					int out_window = (photon_bins[offset[channel_1 + shot_file_num * max_channels] + i] < (*max_bin + *max_pulse_distance * *pulse_spacing + start_and_end_clocks[0 + shot_file_num * 2])) || (photon_bins[offset[channel_1 + shot_file_num * max_channels] + i] > (start_and_end_clocks[1 + shot_file_num * 2] - (*max_bin + *max_pulse_distance * *pulse_spacing)));
-					//Increment i if chan_1 < chan_2
-					int c1gc2 = (photon_bins[offset[channel_1 + shot_file_num * max_channels] + i] < (photon_bins[offset[channel_2 + shot_file_num * max_channels] + j] - tau));
-					//Check if we have a common element increment
-					int c1ec2 = (photon_bins[offset[channel_1 + shot_file_num * max_channels] + i] == (photon_bins[offset[channel_2 + shot_file_num * max_channels] + j] - tau));
-					//Increment running total if channel 1 equals channel 2
-					running_tot += !out_window && c1ec2;
-					//Increment channel 1 if it is greater than channel 2, equal to channel 2 or ouside of the window
-					i += (c1gc2 || c1ec2 || out_window);
-					j += !c1gc2;
-				}
-				coinc[block * block_size + id + shot_file_num * ((*max_bin * 2 + 1) + (*max_pulse_distance * 2))] += running_tot;
-			}
-		}
-	}
-}
-
-//__device__ void loadToShared(long int *photon_bins, long int *photons_bins_a, long int *photons_bins_b, int i, int j, int id) {
-//	for (int dummy = 0; dummy < shared_mem_size; dummy++) {
-//		photons_bins_a[dummy + id * shared_mem_size] = photon_bins[i + dummy];
-//	}
-//	for (int dummy = 0; dummy < shared_mem_size; dummy++) {
-//		photons_bins_b[dummy + id * shared_mem_size] = photon_bins[j + dummy];
-//	}
-//}
-
-__global__ void calculateCoincidencesGPU_g2_test(long int *coinc, long int *photon_bins, long int *start_and_end_clocks, int *max_bin, int *pulse_spacing, int *max_pulse_distance, int *offset, int *photon_bins_length, int num_channels, int shot_file_num) {
-	//Get numerator step to work on
-	int id = threadIdx.x;
-	int block = blockIdx.x;
-	int block_size = blockDim.x;
-
-	int max_bin_gpu = *max_bin;
-	int pulse_spacing_gpu = *pulse_spacing;
-	int max_pulse_distance_gpu = *max_pulse_distance;
-	int num_channels_gpu = num_channels;
-	int shot_file_num_gpu = shot_file_num;
-	__shared__ long int photons_bins_a[shared_mem_size * threads_per_cuda_block_numer];
-	__shared__ long int photons_bins_b[shared_mem_size * threads_per_cuda_block_numer];
+	int32 max_bin_gpu = *max_bin;
+	int32 pulse_spacing_gpu = *pulse_spacing;
+	int32 max_pulse_distance_gpu = *max_pulse_distance;
+	int8 num_channels_gpu = num_channels;
+	int32 shot_file_num_gpu = shot_file_num;
+	__shared__ int32 photons_bins_a[shared_mem_size * threads_per_cuda_block_numer];
+	__shared__ int32 photons_bins_b[shared_mem_size * threads_per_cuda_block_numer];
 
 	//Check we're not calculating something out of range
 	if (block * block_size + id < ((max_bin_gpu * 2 + 1) + (max_pulse_distance_gpu * 2))) {
-		int pulse_shift_measurment = (block * block_size + id >= max_bin_gpu * 2 + 1) && (block * block_size + id < max_bin_gpu * 2 + 1 + (max_pulse_distance_gpu * 2));
-		int pulse_shift = ((block * block_size + id - (max_bin_gpu * 2 + 1) - (max_pulse_distance_gpu)) + ((block * block_size + id - (max_bin_gpu * 2 + 1) - (max_pulse_distance_gpu)) >= 0)) * (pulse_shift_measurment);
-		int tau = (block * block_size + id - (max_bin_gpu)) * (!pulse_shift_measurment);
-		long int start_clock = start_and_end_clocks[0 + shot_file_num * 2];
-		long int end_clock = start_and_end_clocks[1 + shot_file_num * 2];
+		int32 pulse_shift_measurment = (block * block_size + id >= max_bin_gpu * 2 + 1) && (block * block_size + id < max_bin_gpu * 2 + 1 + (max_pulse_distance_gpu * 2));
+		int32 pulse_shift = ((block * block_size + id - (max_bin_gpu * 2 + 1) - (max_pulse_distance_gpu)) + ((block * block_size + id - (max_bin_gpu * 2 + 1) - (max_pulse_distance_gpu)) >= 0)) * (pulse_shift_measurment);
+		int32 tau = (block * block_size + id - (max_bin_gpu)) * (!pulse_shift_measurment);
+		int32 start_clock = start_and_end_clocks[0 + shot_file_num * 2];
+		int32 end_clock = start_and_end_clocks[1 + shot_file_num * 2];
 		
 		tau += pulse_shift * (pulse_spacing_gpu);
-		for (int channel_1 = 0; channel_1 < num_channels_gpu; channel_1++) {
-			for (int channel_2 = channel_1 + 1; channel_2 < num_channels_gpu; channel_2++) {
-				int i = 0;
-				int j = 0;
-				int l_a = photon_bins_length[channel_1 + shot_file_num_gpu * max_channels];
-				int l_b = photon_bins_length[channel_2 + shot_file_num_gpu * max_channels];
-				int running_tot = 0;
+		for (int8 channel_1 = 0; channel_1 < num_channels_gpu; channel_1++) {
+			for (int8 channel_2 = channel_1 + 1; channel_2 < num_channels_gpu; channel_2++) {
+				int32 i = 0;
+				int32 j = 0;
+				int32 l_a = photon_bins_length[channel_1 + shot_file_num_gpu * max_channels];
+				int32 l_b = photon_bins_length[channel_2 + shot_file_num_gpu * max_channels];
+				int32 running_tot = 0;
 				while ((i < l_a) && (j < l_b)) {
-					int i_a = 0;
-					int j_b = 0;
-					int out_window;
-					int c1lc2;
-					int c1ec2;
+					int8 i_a = 0;
+					int8 j_b = 0;
+					int8 out_window;
+					int8 c1gc2;
+					int8 c1ec2;
 					//Load up from global to shared memory some bins
 					#pragma unroll
-					for (int dummy = 0; dummy < shared_mem_size; dummy++) {
+					for (int8 dummy = 0; dummy < shared_mem_size; dummy++) {
 						photons_bins_a[dummy + id * shared_mem_size] = photon_bins[offset[channel_1 + shot_file_num_gpu * max_channels] + i + dummy];
 					}
 					#pragma unroll
-					for (int dummy = 0; dummy < shared_mem_size; dummy++) {
+					for (int8 dummy = 0; dummy < shared_mem_size; dummy++) {
 						photons_bins_b[dummy + id * shared_mem_size] = photon_bins[offset[channel_2 + shot_file_num_gpu * max_channels] + j + dummy];
 					}
 					while ((i_a < shared_mem_size) && (j_b < shared_mem_size) && (i_a + i < l_a) && (j_b + j < l_b)) {
 						//Check if we're outside the window of interest
 						out_window = (photons_bins_a[i_a + id * shared_mem_size] < (max_bin_gpu + max_pulse_distance_gpu * pulse_spacing_gpu + start_clock)) || (photons_bins_a[i_a + id * shared_mem_size] > (end_clock - (max_bin_gpu + max_pulse_distance_gpu * pulse_spacing_gpu)));
-						//Increment i if chan_1 < chan_2
-						c1lc2 = (photons_bins_a[i_a + id * shared_mem_size] < (photons_bins_b[j_b + id * shared_mem_size] - tau));
+						//Increment j if chan_1 > chan_2
+						c1gc2 = (photons_bins_a[i_a + id * shared_mem_size] > (photons_bins_b[j_b + id * shared_mem_size] - tau));
 						//Check if we have a common element increment
 						c1ec2 = (photons_bins_a[i_a + id * shared_mem_size] == (photons_bins_b[j_b + id * shared_mem_size] - tau));
 						//Increment running total if channel 1 equals channel 2
 						running_tot += !(out_window) && c1ec2;
 						//Increment channel 1 if it is greater than channel 2, equal to channel 2 or ouside of the window
-						i_a += (c1lc2 || c1ec2 || out_window);
-						j_b += !c1lc2;
+						i_a += (!c1gc2 || out_window);
+						j_b += (c1gc2 || c1ec2);
 					}
 					i += i_a;
 					j += j_b;
@@ -201,7 +162,7 @@ __global__ void calculateCoincidencesGPU_g2_test(long int *coinc, long int *phot
 	}
 }
 
-__global__ void calculateCoincidencesGPU_g2_channelPair(long int *coinc, long int *photon_bins, long int *start_and_end_clocks, int *max_bin, int *pulse_spacing, int *max_pulse_distance, int *offset, int *photon_bins_length, int channel_1, int channel_2, int shot_file_num) {
+__global__ void calculateCoincidencesGPU_g2_channelPair_old(int32 *coinc, int32 *photon_bins, int32 *start_and_end_clocks, int *max_bin, int *pulse_spacing, int *max_pulse_distance, int *offset, int *photon_bins_length, int channel_1, int channel_2, int shot_file_num) {
 	//Get numerator step to work on
 	int id = threadIdx.x;
 	int block = blockIdx.x;
@@ -240,7 +201,69 @@ __global__ void calculateCoincidencesGPU_g2_channelPair(long int *coinc, long in
 	}
 }
 
-__global__ void calculateCoincidencesGPU_g3(long int *coinc, long int *photon_bins, long int *start_and_end_clocks, int *max_bin, int *pulse_spacing, int *max_pulse_distance, int *offset, int *photon_bins_length, int num_channels, int shot_file_num) {
+__global__ void calculateCoincidencesGPU_g2_channelPair(int32 *coinc, int32 *photon_bins, int32 *start_and_end_clocks, int32 *max_bin, int32 *pulse_spacing, int32 *max_pulse_distance, int32 *offset, int32 *photon_bins_length, int channel_1, int channel_2, int32 shot_file_num) {
+	//Get numerator step to work on
+	int16 id = threadIdx.x;
+	int32 block = blockIdx.x;
+	int16 block_size = blockDim.x;
+
+	int32 max_bin_gpu = *max_bin;
+	int32 pulse_spacing_gpu = *pulse_spacing;
+	int32 max_pulse_distance_gpu = *max_pulse_distance;
+	int32 shot_file_num_gpu = shot_file_num;
+	__shared__ int32 photons_bins_a[shared_mem_size * threads_per_cuda_block_numer];
+	__shared__ int32 photons_bins_b[shared_mem_size * threads_per_cuda_block_numer];
+
+	//Check we're not calculating something out of range
+	if (block * block_size + id < ((max_bin_gpu * 2 + 1) + (max_pulse_distance_gpu * 2))) {
+		int32 pulse_shift_measurment = (block * block_size + id >= max_bin_gpu * 2 + 1) && (block * block_size + id < max_bin_gpu * 2 + 1 + (max_pulse_distance_gpu * 2));
+		int32 pulse_shift = ((block * block_size + id - (max_bin_gpu * 2 + 1) - (max_pulse_distance_gpu)) + ((block * block_size + id - (max_bin_gpu * 2 + 1) - (max_pulse_distance_gpu)) >= 0)) * (pulse_shift_measurment);
+		int32 tau = (block * block_size + id - (max_bin_gpu)) * (!pulse_shift_measurment);
+		int32 start_clock = start_and_end_clocks[0 + shot_file_num * 2];
+		int32 end_clock = start_and_end_clocks[1 + shot_file_num * 2];
+
+		tau += pulse_shift * (pulse_spacing_gpu);
+		int32 i = 0;
+		int32 j = 0;
+		int32 l_a = photon_bins_length[channel_1 + shot_file_num_gpu * max_channels];
+		int32 l_b = photon_bins_length[channel_2 + shot_file_num_gpu * max_channels];
+		int32 running_tot = 0;
+		while ((i < l_a) && (j < l_b)) {
+			int8 i_a = 0;
+			int8 j_b = 0;
+			int8 out_window;
+			int8 c1lc2;
+			int8 c1ec2;
+			//Load up from global to shared memory some bins
+			#pragma unroll
+			for (int8 dummy = 0; dummy < shared_mem_size; dummy++) {
+				photons_bins_a[dummy + id * shared_mem_size] = photon_bins[offset[channel_1 + shot_file_num_gpu * max_channels] + i + dummy];
+			}
+			#pragma unroll
+			for (int8 dummy = 0; dummy < shared_mem_size; dummy++) {
+				photons_bins_b[dummy + id * shared_mem_size] = photon_bins[offset[channel_2 + shot_file_num_gpu * max_channels] + j + dummy];
+			}
+			while ((i_a < shared_mem_size) && (j_b < shared_mem_size) && (i_a + i < l_a) && (j_b + j < l_b)) {
+				//Check if we're outside the window of interest
+				out_window = (photons_bins_a[i_a + id * shared_mem_size] < (max_bin_gpu + max_pulse_distance_gpu * pulse_spacing_gpu + start_clock)) || (photons_bins_a[i_a + id * shared_mem_size] > (end_clock - (max_bin_gpu + max_pulse_distance_gpu * pulse_spacing_gpu)));
+				//Increment i if chan_1 < chan_2
+				c1lc2 = (photons_bins_a[i_a + id * shared_mem_size] < (photons_bins_b[j_b + id * shared_mem_size] - tau));
+				//Check if we have a common element increment
+				c1ec2 = (photons_bins_a[i_a + id * shared_mem_size] == (photons_bins_b[j_b + id * shared_mem_size] - tau));
+				//Increment running total if channel 1 equals channel 2
+				running_tot += !(out_window) && c1ec2;
+				//Increment channel 1 if it is greater than channel 2, equal to channel 2 or ouside of the window
+				i_a += (c1lc2 || c1ec2 || out_window);
+				j_b += !c1lc2;
+			}
+			i += i_a;
+			j += j_b;
+		}
+		coinc[block * block_size + id + shot_file_num_gpu * ((max_bin_gpu * 2 + 1) + (max_pulse_distance_gpu * 2))] += running_tot;
+	}
+}
+
+__global__ void calculateCoincidencesGPU_g3_old(int32 *coinc, int32 *photon_bins, int32 *start_and_end_clocks, int *max_bin, int *pulse_spacing, int *max_pulse_distance, int *offset, int *photon_bins_length, int num_channels, int shot_file_num) {
 	//Get numerator step to work on
 	int id = threadIdx.x;
 	int block = blockIdx.x;
@@ -325,6 +348,133 @@ __global__ void calculateCoincidencesGPU_g3(long int *coinc, long int *photon_bi
 	}
 }
 
+__global__ void calculateCoincidencesGPU_g3(int32 *coinc, int32 *photon_bins, int32 *start_and_end_clocks, int32 *max_bin, int32 *pulse_spacing, int32 *max_pulse_distance, int32 *offset, int32 *photon_bins_length, int8 num_channels, int32 shot_file_num) {
+	//Get numerator step to work on
+	int32 id = threadIdx.x;
+	int32 block = blockIdx.x;
+	int32 block_size = blockDim.x;
+
+	//Explicitly define a bit size for the variables coming in
+	int32 max_bin_gpu = *max_bin;
+	int32 pulse_spacing_gpu = *pulse_spacing;
+	int32 max_pulse_distance_gpu = *max_pulse_distance;
+	int8 num_channels_gpu = num_channels;
+	int32 shot_file_num_gpu = shot_file_num;
+	//Allocate some shared memory for quick access
+	__shared__ int32 photons_bins_a[shared_mem_size * threads_per_cuda_block_numer];
+	__shared__ int32 photons_bins_b[shared_mem_size * threads_per_cuda_block_numer];
+	__shared__ int32 photons_bins_c[shared_mem_size * threads_per_cuda_block_numer];
+
+	//Check if the id is something we're going to do a calculation on
+	int8 in_range = (block * block_size + id) < ((max_bin_gpu * 2 + 1) * (max_bin_gpu * 2 + 1) + (max_pulse_distance_gpu * 2) * (max_pulse_distance_gpu * 2));
+
+	//Check if we're doing a denominator calculation
+	int8 pulse_shift_measurement = in_range && (block * block_size + id >= (max_bin_gpu * 2 + 1) * (max_bin_gpu * 2 + 1));
+
+	//Determine effective id for x and y
+	int32 id_x = ((block * block_size + id) % (2 * (max_bin_gpu) + 1)) * (!pulse_shift_measurement);
+	id_x += ((block * block_size + id - (2 * (max_bin_gpu) + 1) * (2 * (max_bin_gpu) + 1)) % (2 * (max_pulse_distance_gpu))) * (pulse_shift_measurement);
+	int32 id_y = ((block * block_size + id) / (2 * (max_bin_gpu) + 1)) * (!pulse_shift_measurement);
+	id_y += ((block * block_size + id - (2 * (max_bin_gpu) + 1) * (2 * (max_bin_gpu) + 1)) / (2 * (max_pulse_distance_gpu))) * (pulse_shift_measurement);
+
+	//Check we're not calculating something out of range
+	if (in_range && (!pulse_shift_measurement || (pulse_shift_measurement && id_x != id_y))) {
+
+		//Calculate whether our value for tau_1 and tau_2
+		int32 tau_1 = (id_x - (max_bin_gpu)) * (!pulse_shift_measurement);
+		int32 pulse_shift_1 = ((id_x - (max_pulse_distance_gpu)) + ((id_x - (max_pulse_distance_gpu)) >= 0)) * (pulse_shift_measurement);
+		int32 pulse_shift_2 = ((id_y - (max_pulse_distance_gpu)) + ((id_y - (max_pulse_distance_gpu)) >= 0)) * (pulse_shift_measurement);
+		tau_1 += pulse_shift_1 * (pulse_spacing_gpu);
+		int32 tau_2 = (id_y - (max_bin_gpu)) * (!pulse_shift_measurement);
+		tau_2 += pulse_shift_2 * (pulse_spacing_gpu);
+
+		//Store the start and end clocks in register space
+		int32 start_clock = start_and_end_clocks[0 + shot_file_num_gpu * 2];
+		int32 end_clock = start_and_end_clocks[1 + shot_file_num_gpu * 2];
+
+		for (int8 channel_1 = 0; channel_1 < num_channels; channel_1++) {
+			for (int8 channel_2 = channel_1 + 1; channel_2 < num_channels; channel_2++) {
+				for (int8 channel_3 = channel_2 + 1; channel_3 < num_channels; channel_3++) {\
+					//Indices for the photon tag for channel 1, 2 and 3
+					int32 i = 0;
+					int32 j = 0;
+					int32 k = 0;
+
+					//Length of photon tag array for channel 1, 2 and 3
+					int32 l_a = photon_bins_length[channel_1 + shot_file_num_gpu * max_channels];
+					int32 l_b = photon_bins_length[channel_2 + shot_file_num_gpu * max_channels];
+					int32 l_c = photon_bins_length[channel_3 + shot_file_num_gpu * max_channels];
+
+					//Running total of coincidences
+					int32 running_tot = 0;
+
+					while ((i < l_a) && (j < l_b) && (k < l_c)) {
+						
+						//Minor indices for working with a subset of the photon tags
+						int8 i_a = 0;
+						int8 j_b = 0;
+						int8 k_c = 0;
+
+						//Initialise truth values (didn't use bool as it seemed to fuck up)
+						int8 out_window;
+						int8 c1gc2;
+						int8 c1ec2;
+						int8 c1gc3;
+						int8 c1ec3;
+
+						//Load up from global to shared memory some bins
+						#pragma unroll
+						for (int8 dummy = 0; dummy < shared_mem_size; dummy++) {
+							photons_bins_a[dummy + id * shared_mem_size] = photon_bins[offset[channel_1 + shot_file_num_gpu * max_channels] + i + dummy];
+						}
+						#pragma unroll
+						for (int8 dummy = 0; dummy < shared_mem_size; dummy++) {
+							photons_bins_b[dummy + id * shared_mem_size] = photon_bins[offset[channel_2 + shot_file_num_gpu * max_channels] + j + dummy];
+						}
+						#pragma unroll
+						for (int8 dummy = 0; dummy < shared_mem_size; dummy++) {
+							photons_bins_c[dummy + id * shared_mem_size] = photon_bins[offset[channel_3 + shot_file_num_gpu * max_channels] + k + dummy];
+						}
+
+						//Loop over shared memory arrays
+						while ((i_a < shared_mem_size) && (j_b < shared_mem_size) && (k_c < shared_mem_size) && (i_a + i < l_a) && (j_b + j < l_b) && (k_c + k < l_c)) {
+							//Check if we're in the window of interest
+							out_window = (photons_bins_a[i_a + id * shared_mem_size] < (max_bin_gpu + max_pulse_distance_gpu * pulse_spacing_gpu + start_clock)) || (photons_bins_a[i_a + id * shared_mem_size] > (end_clock - (max_bin_gpu + max_pulse_distance_gpu * pulse_spacing_gpu)));
+							//Chan_1 > chan_2
+							c1gc2 = photons_bins_a[i_a + id * shared_mem_size] > (photons_bins_b[j_b + id * shared_mem_size] - tau_1);
+							//Chan_1 > chan_3
+							c1gc3 = photons_bins_a[i_a + id * shared_mem_size] > (photons_bins_c[k_c + id * shared_mem_size] - tau_2);
+							//Chan_1 == chan_2
+							c1ec2 = photons_bins_a[i_a + id * shared_mem_size] == (photons_bins_b[j_b + id * shared_mem_size] - tau_1);
+							//Chan_1 == chan_3
+							c1ec3 = photons_bins_a[i_a + id * shared_mem_size] == (photons_bins_c[k_c + id * shared_mem_size] - tau_2);
+
+							//Increment the running total if all three are equal and we're in the window
+							running_tot += !out_window && c1ec2 && c1ec3;
+
+							//Increment j if chan_2 < chan_1 or all three are equal
+							j_b += c1gc2 || (c1ec2 && c1ec3);
+							//Increment k if chan_3 < chan_1 or all three are equal
+							k_c += c1gc3 || (c1ec2 && c1ec3);
+
+							//Increment i if we're out the window or if chan_1 <= chan_2 and chan_1 <= chan_3
+							i_a += out_window || (!c1gc2 && !c1gc3);
+
+						}
+
+						//Shift the major indices on by the shared memory indices
+						i += i_a;
+						j += j_b;
+						k += k_c;
+					}
+					//Add running total to coincidence count
+					coinc[(block * block_size + id) + shot_file_num_gpu * ((max_bin_gpu * 2 + 1) * (max_bin_gpu * 2 + 1) + (max_pulse_distance_gpu * 2) * (max_pulse_distance_gpu * 2))] += running_tot;
+				}
+			}
+		}
+	}
+}
+
 //Function grabs all tags and channel list from file
 void fileToShotData(shotData *shot_data, char* filename) {
 	//Open up file
@@ -394,7 +544,7 @@ void fileToShotData(shotData *shot_data, char* filename) {
 	file.close();
 
 	//Populate channel map
-	for (short int i = 0; i < shot_data->channel_list.size(); i++) {
+	for (int16 i = 0; i < shot_data->channel_list.size(); i++) {
 		shot_data->channel_map[shot_data->channel_list[i]] = i;
 	}
 }
@@ -424,7 +574,7 @@ void populateBlock(std::vector<shotData> *shot_block, std::vector<char *> *filel
 
 //Process the time tags, assigning them to the correct channel, binning them appropriately and removing tags which do not fall in the clock mask
 void sortTags(shotData *shot_data) {
-	long int i;
+	int32 i;
 	int high_count = 0;
 	//Loop over all tags in clock_tags
 	for (i = 0; i < shot_data->clock_tags.size(); i++) {
@@ -453,7 +603,7 @@ void sortTags(shotData *shot_data) {
 		}
 		else {
 			//Figure out if it fits within the mask
-			long long int time_tag = ((shot_data->photon_tags[i] >> 1) & 0x7FFFFFF) + (high_count << 27) - ((shot_data->start_tags[1] >> 1) & 0x7FFFFFF);
+			int64 time_tag = ((shot_data->photon_tags[i] >> 1) & 0x7FFFFFF) + (high_count << 27) - ((shot_data->start_tags[1] >> 1) & 0x7FFFFFF);
 			bool valid = true;
 			while (valid) {
 				//printf("%i\t%i\t%i\t", time_tag, shot_data->sorted_clock_tags[1][clock_pointer], shot_data->sorted_clock_tags[0][clock_pointer - 1]);
@@ -594,7 +744,7 @@ DLLEXPORT void count_tags(char **file_list, int file_list_length, double max_tim
 	}
 }
 
-DLLEXPORT void getG2Correlations_channelPair(char **file_list, int file_list_length, double max_time, double bin_width, double pulse_spacing, int max_pulse_distance, PyObject *numer, long int *denom, int channel_1, int channel_2) {
+DLLEXPORT void getG2Correlations_channelPair(char **file_list, int file_list_length, double max_time, double bin_width, double pulse_spacing, int max_pulse_distance, PyObject *numer, int32 *denom, int channel_1, int channel_2) {
 
 	std::vector<char *> filelist(file_list_length);
 	//Grab filename and stick it into filelist vector
@@ -635,9 +785,9 @@ DLLEXPORT void getG2Correlations_channelPair(char **file_list, int file_list_len
 	cudaError_t cudaStatus;
 
 	//Pointers for our various pinned memory for host-GPU DMA
-	long int* pinned_photon_bins[num_gpu];
-	long int* pinned_start_and_end_clocks[num_gpu];
-	int* pinned_photon_bins_length[num_gpu];
+	int32* pinned_photon_bins[num_gpu];
+	int32* pinned_start_and_end_clocks[num_gpu];
+	int32* pinned_photon_bins_length[num_gpu];
 
 	//Load some stuff to the GPU we will use permenantly
 	//Allocate memory on GPU for various things
@@ -651,64 +801,64 @@ DLLEXPORT void getG2Correlations_channelPair(char **file_list, int file_list_len
 			goto Error;
 		}
 
-		cudaMallocHost((long int**)&pinned_photon_bins[gpu], max_tags_length * max_channels * file_block_size * sizeof(long int));
-		cudaMallocHost((long int**)&pinned_start_and_end_clocks[gpu], 2 * file_block_size * sizeof(long int));
-		cudaMallocHost((int**)&pinned_photon_bins_length[gpu], max_channels * file_block_size * sizeof(int));
+		cudaMallocHost((int32**)&pinned_photon_bins[gpu], max_tags_length * max_channels * file_block_size * sizeof(int32));
+		cudaMallocHost((int32**)&pinned_start_and_end_clocks[gpu], 2 * file_block_size * sizeof(int32));
+		cudaMallocHost((int32**)&pinned_photon_bins_length[gpu], max_channels * file_block_size * sizeof(int32));
 
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).photon_bins_gpu), max_channels * max_tags_length * file_block_size * sizeof(long int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).photon_bins_gpu), max_channels * max_tags_length * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc photon_bins_gpu failed\n");
 			printf("%s\n", cudaGetErrorString(cudaStatus));
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).offset_gpu), max_channels * file_block_size * sizeof(int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).offset_gpu), max_channels * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc offset_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).photon_bins_length_gpu), max_channels * file_block_size * sizeof(int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).photon_bins_length_gpu), max_channels * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc photon_bins_length_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).coinc_gpu), ((2 * (max_bin)+1) + (max_pulse_distance * 2)) * file_block_size * sizeof(long int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).coinc_gpu), ((2 * (max_bin)+1) + (max_pulse_distance * 2)) * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc numer_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).start_and_end_clocks_gpu), 2 * file_block_size * sizeof(long int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).start_and_end_clocks_gpu), 2 * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc start_and_end_clocks_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).max_bin_gpu), sizeof(int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).max_bin_gpu), sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc max_bin_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).pulse_spacing_gpu), sizeof(int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).pulse_spacing_gpu), sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc pulse_spacing_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).max_pulse_distance_gpu), sizeof(int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).max_pulse_distance_gpu), sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc max_pulse_distance_gpu failed!\n");
 			goto Error;
 		}
 
 		//And set some values that are constant across all data
-		cudaStatus = cudaMemcpy(((gpu_data[gpu]).max_bin_gpu), &max_bin, sizeof(int), cudaMemcpyHostToDevice);
+		cudaStatus = cudaMemcpy(((gpu_data[gpu]).max_bin_gpu), &max_bin, sizeof(int32), cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemcpy failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMemcpy(((gpu_data[gpu]).pulse_spacing_gpu), &bin_pulse_spacing, sizeof(int), cudaMemcpyHostToDevice);
+		cudaStatus = cudaMemcpy(((gpu_data[gpu]).pulse_spacing_gpu), &bin_pulse_spacing, sizeof(int32), cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemcpy failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMemcpy(((gpu_data[gpu]).max_pulse_distance_gpu), &max_pulse_distance, sizeof(int), cudaMemcpyHostToDevice);
+		cudaStatus = cudaMemcpy(((gpu_data[gpu]).max_pulse_distance_gpu), &max_pulse_distance, sizeof(int32), cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemcpy failed!\n");
 			goto Error;
@@ -719,14 +869,14 @@ DLLEXPORT void getG2Correlations_channelPair(char **file_list, int file_list_len
 		for (int i = 0; i < max_channels * file_block_size; i++) {
 			host_offest_array[i] = i * max_tags_length;
 		}
-		cudaStatus = cudaMemcpy(((gpu_data[gpu]).offset_gpu), host_offest_array, max_channels * file_block_size * sizeof(int), cudaMemcpyHostToDevice);
+		cudaStatus = cudaMemcpy(((gpu_data[gpu]).offset_gpu), host_offest_array, max_channels * file_block_size * sizeof(int32), cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemcpy failed!\n");
 			goto Error;
 		}
 
 		//Set numerator and denominator to 0
-		cudaStatus = cudaMemset(((gpu_data[gpu])).coinc_gpu, 0, ((2 * (max_bin)+1) + (max_pulse_distance * 2)) * file_block_size * sizeof(long int));
+		cudaStatus = cudaMemset(((gpu_data[gpu])).coinc_gpu, 0, ((2 * (max_bin)+1) + (max_pulse_distance * 2)) * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemset failed!\n");
 			goto Error;
@@ -808,9 +958,9 @@ DLLEXPORT void getG2Correlations_channelPair(char **file_list, int file_list_len
 					if (num_channels >= 2) {
 
 
-						std::vector<long int*> photon_bins;
-						long int start_and_end_clocks[2];
-						std::vector<int> photon_bins_length;
+						std::vector<int32*> photon_bins;
+						int32 start_and_end_clocks[2];
+						std::vector<int32> photon_bins_length;
 						photon_bins.resize(max_channels);
 						photon_bins_length.resize(max_channels);
 
@@ -831,8 +981,8 @@ DLLEXPORT void getG2Correlations_channelPair(char **file_list, int file_list_len
 						//Write photon bins to memory
 						int photon_offset = shot_file_num * max_channels * max_tags_length;
 						for (int i = 0; i < photon_bins_length.size(); i++) {
-							memcpy(pinned_photon_bins[gpu] + photon_offset, (photon_bins)[i], (photon_bins_length)[i] * sizeof(long int));
-							cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).photon_bins_gpu + photon_offset, pinned_photon_bins[gpu] + photon_offset, (photon_bins_length)[i] * sizeof(long int), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
+							memcpy(pinned_photon_bins[gpu] + photon_offset, (photon_bins)[i], (photon_bins_length)[i] * sizeof(int32));
+							cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).photon_bins_gpu + photon_offset, pinned_photon_bins[gpu] + photon_offset, (photon_bins_length)[i] * sizeof(int32), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
 							if (cudaStatus != cudaSuccess) {
 								printf("cudaMemcpy photon_bins failed!\n");
 								goto Error;
@@ -842,8 +992,8 @@ DLLEXPORT void getG2Correlations_channelPair(char **file_list, int file_list_len
 
 						int clock_offset = shot_file_num * 2;
 						//And other parameters
-						memcpy(pinned_start_and_end_clocks[gpu] + clock_offset, start_and_end_clocks, 2 * sizeof(long int));
-						cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).start_and_end_clocks_gpu + clock_offset, pinned_start_and_end_clocks[gpu] + clock_offset, 2 * sizeof(long int), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
+						memcpy(pinned_start_and_end_clocks[gpu] + clock_offset, start_and_end_clocks, 2 * sizeof(int32));
+						cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).start_and_end_clocks_gpu + clock_offset, pinned_start_and_end_clocks[gpu] + clock_offset, 2 * sizeof(int32), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
 						if (cudaStatus != cudaSuccess) {
 							printf("cudaMemcpy clock_offset failed!\n");
 							goto Error;
@@ -852,9 +1002,9 @@ DLLEXPORT void getG2Correlations_channelPair(char **file_list, int file_list_len
 						int length_offset = shot_file_num * max_channels;
 						//Can't copy vector to cuda easily
 						for (int i = 0; i < photon_bins_length.size(); i++) {
-							memcpy(pinned_photon_bins_length[gpu] + i + length_offset, &((photon_bins_length)[i]), sizeof(int));
+							memcpy(pinned_photon_bins_length[gpu] + i + length_offset, &((photon_bins_length)[i]), sizeof(int32));
 						}
-						cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).photon_bins_length_gpu + length_offset, pinned_photon_bins_length[gpu] + length_offset, max_channels * sizeof(int), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
+						cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).photon_bins_length_gpu + length_offset, pinned_photon_bins_length[gpu] + length_offset, max_channels * sizeof(int32), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
 						if (cudaStatus != cudaSuccess) {
 							printf("cudaMemcpy length_offset failed!\n");
 							goto Error;
@@ -907,11 +1057,11 @@ DLLEXPORT void getG2Correlations_channelPair(char **file_list, int file_list_len
 			printf("cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
 			goto Error;
 		}
-		long int *streamed_coinc;
-		streamed_coinc = (long int *)malloc(((2 * (max_bin)+1) + (max_pulse_distance * 2)) * file_block_size * sizeof(long int));
+		int32 *streamed_coinc;
+		streamed_coinc = (int32 *)malloc(((2 * (max_bin)+1) + (max_pulse_distance * 2)) * file_block_size * sizeof(int32));
 
 		// Copy output vector from GPU buffer to host memory.
-		cudaStatus = cudaMemcpy(streamed_coinc, (gpu_data[gpu]).coinc_gpu, ((2 * (max_bin)+1) + (max_pulse_distance * 2)) * file_block_size * sizeof(long int), cudaMemcpyDeviceToHost);
+		cudaStatus = cudaMemcpy(streamed_coinc, (gpu_data[gpu]).coinc_gpu, ((2 * (max_bin)+1) + (max_pulse_distance * 2)) * file_block_size * sizeof(int32), cudaMemcpyDeviceToHost);
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemcpy numerator failed!\n");
 			free(streamed_coinc);
@@ -967,7 +1117,7 @@ Error:
 	}
 }
 
-DLLEXPORT void getG2Correlations(char **file_list, int file_list_length, double max_time, double bin_width, double pulse_spacing, int max_pulse_distance, PyObject *numer, long int *denom) {
+DLLEXPORT void getG2Correlations(char **file_list, int file_list_length, double max_time, double bin_width, double pulse_spacing, int max_pulse_distance, PyObject *numer, int32 *denom) {
 	
 	std::vector<char *> filelist(file_list_length);
 	//Grab filename and stick it into filelist vector
@@ -1008,9 +1158,9 @@ DLLEXPORT void getG2Correlations(char **file_list, int file_list_length, double 
 	cudaError_t cudaStatus;
 
 	//Pointers for our various pinned memory for host-GPU DMA
-	long int* pinned_photon_bins[num_gpu];
-	long int* pinned_start_and_end_clocks[num_gpu];
-	int* pinned_photon_bins_length[num_gpu];
+	int32* pinned_photon_bins[num_gpu];
+	int32* pinned_start_and_end_clocks[num_gpu];
+	int32* pinned_photon_bins_length[num_gpu];
 
 	//Load some stuff to the GPU we will use permenantly
 	//Allocate memory on GPU for various things
@@ -1024,64 +1174,64 @@ DLLEXPORT void getG2Correlations(char **file_list, int file_list_length, double 
 			goto Error;
 		}
 
-		cudaMallocHost((long int**)&pinned_photon_bins[gpu], max_tags_length * max_channels * file_block_size * sizeof(long int));
-		cudaMallocHost((long int**)&pinned_start_and_end_clocks[gpu], 2 * file_block_size * sizeof(long int));
-		cudaMallocHost((int**)&pinned_photon_bins_length[gpu], max_channels * file_block_size * sizeof(int));
+		cudaMallocHost((int32**)&pinned_photon_bins[gpu], max_tags_length * max_channels * file_block_size * sizeof(int32));
+		cudaMallocHost((int32**)&pinned_start_and_end_clocks[gpu], 2 * file_block_size * sizeof(int32));
+		cudaMallocHost((int32**)&pinned_photon_bins_length[gpu], max_channels * file_block_size * sizeof(int32));
 
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).photon_bins_gpu), max_channels * max_tags_length * file_block_size * sizeof(long int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).photon_bins_gpu), max_channels * max_tags_length * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc photon_bins_gpu failed\n");
 			printf("%s\n", cudaGetErrorString(cudaStatus));
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).offset_gpu), max_channels * file_block_size * sizeof(int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).offset_gpu), max_channels * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc offset_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).photon_bins_length_gpu), max_channels * file_block_size * sizeof(int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).photon_bins_length_gpu), max_channels * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc photon_bins_length_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).coinc_gpu), ((2 * (max_bin)+1) + (max_pulse_distance * 2)) * file_block_size * sizeof(long int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).coinc_gpu), ((2 * (max_bin)+1) + (max_pulse_distance * 2)) * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc numer_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).start_and_end_clocks_gpu), 2 * file_block_size * sizeof(long int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).start_and_end_clocks_gpu), 2 * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc start_and_end_clocks_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).max_bin_gpu), sizeof(int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).max_bin_gpu), sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc max_bin_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).pulse_spacing_gpu), sizeof(int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).pulse_spacing_gpu), sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc pulse_spacing_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).max_pulse_distance_gpu), sizeof(int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).max_pulse_distance_gpu), sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc max_pulse_distance_gpu failed!\n");
 			goto Error;
 		}
 
 		//And set some values that are constant across all data
-		cudaStatus = cudaMemcpy(((gpu_data[gpu]).max_bin_gpu), &max_bin, sizeof(int), cudaMemcpyHostToDevice);
+		cudaStatus = cudaMemcpy(((gpu_data[gpu]).max_bin_gpu), &max_bin, sizeof(int32), cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemcpy failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMemcpy(((gpu_data[gpu]).pulse_spacing_gpu), &bin_pulse_spacing, sizeof(int), cudaMemcpyHostToDevice);
+		cudaStatus = cudaMemcpy(((gpu_data[gpu]).pulse_spacing_gpu), &bin_pulse_spacing, sizeof(int32), cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemcpy failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMemcpy(((gpu_data[gpu]).max_pulse_distance_gpu), &max_pulse_distance, sizeof(int), cudaMemcpyHostToDevice);
+		cudaStatus = cudaMemcpy(((gpu_data[gpu]).max_pulse_distance_gpu), &max_pulse_distance, sizeof(int32), cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemcpy failed!\n");
 			goto Error;
@@ -1092,14 +1242,14 @@ DLLEXPORT void getG2Correlations(char **file_list, int file_list_length, double 
 		for (int i = 0; i < max_channels * file_block_size; i++) {
 			host_offest_array[i] = i * max_tags_length;
 		}
-		cudaStatus = cudaMemcpy(((gpu_data[gpu]).offset_gpu), host_offest_array, max_channels * file_block_size * sizeof(int), cudaMemcpyHostToDevice);
+		cudaStatus = cudaMemcpy(((gpu_data[gpu]).offset_gpu), host_offest_array, max_channels * file_block_size * sizeof(int32), cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemcpy failed!\n");
 			goto Error;
 		}
 
 		//Set numerator and denominator to 0
-		cudaStatus = cudaMemset(((gpu_data[gpu])).coinc_gpu, 0, ((2 * (max_bin)+1) + (max_pulse_distance * 2)) * file_block_size * sizeof(long int));
+		cudaStatus = cudaMemset(((gpu_data[gpu])).coinc_gpu, 0, ((2 * (max_bin)+1) + (max_pulse_distance * 2)) * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemset failed!\n");
 			goto Error;
@@ -1181,9 +1331,9 @@ DLLEXPORT void getG2Correlations(char **file_list, int file_list_length, double 
 					if (num_channels >= 2) {
 
 
-						std::vector<long int*> photon_bins;
-						long int start_and_end_clocks[2];
-						std::vector<int> photon_bins_length;
+						std::vector<int32*> photon_bins;
+						int32 start_and_end_clocks[2];
+						std::vector<int32> photon_bins_length;
 						photon_bins.resize(max_channels);
 						photon_bins_length.resize(max_channels);
 
@@ -1204,8 +1354,8 @@ DLLEXPORT void getG2Correlations(char **file_list, int file_list_length, double 
 						//Write photon bins to memory
 						int photon_offset = shot_file_num * max_channels * max_tags_length;
 						for (int i = 0; i < photon_bins_length.size(); i++) {
-							memcpy(pinned_photon_bins[gpu] + photon_offset, (photon_bins)[i], (photon_bins_length)[i] * sizeof(long int));
-							cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).photon_bins_gpu + photon_offset, pinned_photon_bins[gpu] + photon_offset, (photon_bins_length)[i] * sizeof(long int), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
+							memcpy(pinned_photon_bins[gpu] + photon_offset, (photon_bins)[i], (photon_bins_length)[i] * sizeof(int32));
+							cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).photon_bins_gpu + photon_offset, pinned_photon_bins[gpu] + photon_offset, (photon_bins_length)[i] * sizeof(int32), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
 							if (cudaStatus != cudaSuccess) {
 								printf("cudaMemcpy photon_bins failed!\n");
 								goto Error;
@@ -1215,8 +1365,8 @@ DLLEXPORT void getG2Correlations(char **file_list, int file_list_length, double 
 
 						int clock_offset = shot_file_num * 2;
 						//And other parameters
-						memcpy(pinned_start_and_end_clocks[gpu] + clock_offset, start_and_end_clocks, 2 * sizeof(long int));
-						cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).start_and_end_clocks_gpu + clock_offset, pinned_start_and_end_clocks[gpu] + clock_offset, 2 * sizeof(long int), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
+						memcpy(pinned_start_and_end_clocks[gpu] + clock_offset, start_and_end_clocks, 2 * sizeof(int32));
+						cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).start_and_end_clocks_gpu + clock_offset, pinned_start_and_end_clocks[gpu] + clock_offset, 2 * sizeof(int32), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
 						if (cudaStatus != cudaSuccess) {
 							printf("cudaMemcpy clock_offset failed!\n");
 							goto Error;
@@ -1225,9 +1375,9 @@ DLLEXPORT void getG2Correlations(char **file_list, int file_list_length, double 
 						int length_offset = shot_file_num * max_channels;
 						//Can't copy vector to cuda easily
 						for (int i = 0; i < photon_bins_length.size(); i++) {
-							memcpy(pinned_photon_bins_length[gpu] + i + length_offset, &((photon_bins_length)[i]), sizeof(int));
+							memcpy(pinned_photon_bins_length[gpu] + i + length_offset, &((photon_bins_length)[i]), sizeof(int32));
 						}
-						cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).photon_bins_length_gpu + length_offset, pinned_photon_bins_length[gpu] + length_offset, max_channels * sizeof(int), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
+						cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).photon_bins_length_gpu + length_offset, pinned_photon_bins_length[gpu] + length_offset, max_channels * sizeof(int32), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
 						if (cudaStatus != cudaSuccess) {
 							printf("cudaMemcpy length_offset failed!\n");
 							goto Error;
@@ -1236,7 +1386,7 @@ DLLEXPORT void getG2Correlations(char **file_list, int file_list_length, double 
 						//Create an event to let us know all the async copies have occured
 						cudaEventRecord(events[gpu][shot_file_num], streams[gpu][shot_file_num]);
 						//Run kernels
-						calculateCoincidencesGPU_g2_test << <cuda_blocks_numer, threads_per_cuda_block_numer, 0, streams[gpu][shot_file_num] >> > ((gpu_data[gpu]).coinc_gpu, (gpu_data[gpu]).photon_bins_gpu, (gpu_data[gpu]).start_and_end_clocks_gpu, (gpu_data[gpu]).max_bin_gpu, (gpu_data[gpu]).pulse_spacing_gpu, (gpu_data[gpu]).max_pulse_distance_gpu, (gpu_data[gpu]).offset_gpu, (gpu_data[gpu]).photon_bins_length_gpu, num_channels, shot_file_num);
+						calculateCoincidencesGPU_g2 << <cuda_blocks_numer, threads_per_cuda_block_numer, 0, streams[gpu][shot_file_num] >> > ((gpu_data[gpu]).coinc_gpu, (gpu_data[gpu]).photon_bins_gpu, (gpu_data[gpu]).start_and_end_clocks_gpu, (gpu_data[gpu]).max_bin_gpu, (gpu_data[gpu]).pulse_spacing_gpu, (gpu_data[gpu]).max_pulse_distance_gpu, (gpu_data[gpu]).offset_gpu, (gpu_data[gpu]).photon_bins_length_gpu, num_channels, shot_file_num);
 					}
 				}
 			}
@@ -1280,11 +1430,11 @@ DLLEXPORT void getG2Correlations(char **file_list, int file_list_length, double 
 			printf("cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
 			goto Error;
 		}
-		long int *streamed_coinc;
-		streamed_coinc = (long int *)malloc(((2 * (max_bin)+1) + (max_pulse_distance * 2)) * file_block_size * sizeof(long int));
+		int32 *streamed_coinc;
+		streamed_coinc = (int32 *)malloc(((2 * (max_bin)+1) + (max_pulse_distance * 2)) * file_block_size * sizeof(int32));
 
 		// Copy output vector from GPU buffer to host memory.
-		cudaStatus = cudaMemcpy(streamed_coinc, (gpu_data[gpu]).coinc_gpu, ((2 * (max_bin)+1) + (max_pulse_distance * 2)) * file_block_size * sizeof(long int), cudaMemcpyDeviceToHost);
+		cudaStatus = cudaMemcpy(streamed_coinc, (gpu_data[gpu]).coinc_gpu, ((2 * (max_bin)+1) + (max_pulse_distance * 2)) * file_block_size * sizeof(int32), cudaMemcpyDeviceToHost);
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemcpy numerator failed!\n");
 			free(streamed_coinc);
@@ -1340,7 +1490,7 @@ Error:
 	}
 }
 
-DLLEXPORT void getG3Correlations(char **file_list, int file_list_length, double max_time, double bin_width, double pulse_spacing, int max_pulse_distance, PyObject *numer, long int *denom) {
+DLLEXPORT void getG3Correlations(char **file_list, int file_list_length, double max_time, double bin_width, double pulse_spacing, int max_pulse_distance, PyObject *numer, int32 *denom) {
 	std::vector<char *> filelist(file_list_length);
 	//Grab filename and stick it into filelist vector
 	for (int i = 0; i < file_list_length; i++) {
@@ -1380,9 +1530,9 @@ DLLEXPORT void getG3Correlations(char **file_list, int file_list_length, double 
 	cudaError_t cudaStatus;
 
 	//Pointers for our various pinned memory for host-GPU DMA
-	long int* pinned_photon_bins[num_gpu];
-	long int* pinned_start_and_end_clocks[num_gpu];
-	int* pinned_photon_bins_length[num_gpu];
+	int32* pinned_photon_bins[num_gpu];
+	int32* pinned_start_and_end_clocks[num_gpu];
+	int32* pinned_photon_bins_length[num_gpu];
 
 	//Load some stuff to the GPU we will use permenantly
 	//Allocate memory on GPU for various things
@@ -1396,64 +1546,64 @@ DLLEXPORT void getG3Correlations(char **file_list, int file_list_length, double 
 			goto Error;
 		}
 
-		cudaMallocHost((long int**)&pinned_photon_bins[gpu], max_tags_length * max_channels * file_block_size * sizeof(long int));
-		cudaMallocHost((long int**)&pinned_start_and_end_clocks[gpu], 2 * file_block_size * sizeof(long int));
-		cudaMallocHost((int**)&pinned_photon_bins_length[gpu], max_channels * file_block_size * sizeof(int));
+		cudaMallocHost((int32**)&pinned_photon_bins[gpu], max_tags_length * max_channels * file_block_size * sizeof(int32));
+		cudaMallocHost((int32**)&pinned_start_and_end_clocks[gpu], 2 * file_block_size * sizeof(int32));
+		cudaMallocHost((int32**)&pinned_photon_bins_length[gpu], max_channels * file_block_size * sizeof(int32));
 
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).photon_bins_gpu), max_channels * max_tags_length * file_block_size * sizeof(long int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).photon_bins_gpu), max_channels * max_tags_length * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc photon_bins_gpu failed\n");
 			printf("%s\n", cudaGetErrorString(cudaStatus));
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).offset_gpu), max_channels * file_block_size * sizeof(int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).offset_gpu), max_channels * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc offset_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).photon_bins_length_gpu), max_channels * file_block_size * sizeof(int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).photon_bins_length_gpu), max_channels * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc photon_bins_length_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&(gpu_data[gpu].coinc_gpu), (((2 * (max_bin)+1) * (2 * (max_bin)+1)) + (max_pulse_distance * 2) * (max_pulse_distance * 2)) * file_block_size * sizeof(long int));
+		cudaStatus = cudaMalloc((void**)&(gpu_data[gpu].coinc_gpu), (((2 * (max_bin)+1) * (2 * (max_bin)+1)) + (max_pulse_distance * 2) * (max_pulse_distance * 2)) * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc numer_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).start_and_end_clocks_gpu), 2 * file_block_size * sizeof(long int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).start_and_end_clocks_gpu), 2 * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc start_and_end_clocks_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).max_bin_gpu), sizeof(int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).max_bin_gpu), sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc max_bin_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).pulse_spacing_gpu), sizeof(int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).pulse_spacing_gpu), sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc pulse_spacing_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).max_pulse_distance_gpu), sizeof(int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).max_pulse_distance_gpu), sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc max_pulse_distance_gpu failed!\n");
 			goto Error;
 		}
 
 		//And set some values that are constant across all data
-		cudaStatus = cudaMemcpy(((gpu_data[gpu]).max_bin_gpu), &max_bin, sizeof(int), cudaMemcpyHostToDevice);
+		cudaStatus = cudaMemcpy(((gpu_data[gpu]).max_bin_gpu), &max_bin, sizeof(int32), cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemcpy failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMemcpy(((gpu_data[gpu]).pulse_spacing_gpu), &bin_pulse_spacing, sizeof(int), cudaMemcpyHostToDevice);
+		cudaStatus = cudaMemcpy(((gpu_data[gpu]).pulse_spacing_gpu), &bin_pulse_spacing, sizeof(int32), cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemcpy failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMemcpy(((gpu_data[gpu]).max_pulse_distance_gpu), &max_pulse_distance, sizeof(int), cudaMemcpyHostToDevice);
+		cudaStatus = cudaMemcpy(((gpu_data[gpu]).max_pulse_distance_gpu), &max_pulse_distance, sizeof(int32), cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemcpy failed!\n");
 			goto Error;
@@ -1464,14 +1614,14 @@ DLLEXPORT void getG3Correlations(char **file_list, int file_list_length, double 
 		for (int i = 0; i < max_channels * file_block_size; i++) {
 			host_offest_array[i] = i * max_tags_length;
 		}
-		cudaStatus = cudaMemcpy(((gpu_data[gpu]).offset_gpu), host_offest_array, max_channels * file_block_size * sizeof(int), cudaMemcpyHostToDevice);
+		cudaStatus = cudaMemcpy(((gpu_data[gpu]).offset_gpu), host_offest_array, max_channels * file_block_size * sizeof(int32), cudaMemcpyHostToDevice);
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemcpy failed!\n");
 			goto Error;
 		}
 
 		//Set numerator and denominator to 0
-		cudaStatus = cudaMemset(((gpu_data[gpu])).coinc_gpu, 0, (((2 * (max_bin)+1) * (2 * (max_bin)+1)) + (max_pulse_distance * 2) * (max_pulse_distance * 2)) * file_block_size * sizeof(long int));
+		cudaStatus = cudaMemset(((gpu_data[gpu])).coinc_gpu, 0, (((2 * (max_bin)+1) * (2 * (max_bin)+1)) + (max_pulse_distance * 2) * (max_pulse_distance * 2)) * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemset failed!\n");
 			goto Error;
@@ -1553,9 +1703,9 @@ DLLEXPORT void getG3Correlations(char **file_list, int file_list_length, double 
 					if (num_channels >= 2) {
 
 
-						std::vector<long int*> photon_bins;
-						long int start_and_end_clocks[2];
-						std::vector<int> photon_bins_length;
+						std::vector<int32*> photon_bins;
+						int32 start_and_end_clocks[2];
+						std::vector<int32> photon_bins_length;
 						photon_bins.resize(max_channels);
 						photon_bins_length.resize(max_channels);
 
@@ -1576,8 +1726,8 @@ DLLEXPORT void getG3Correlations(char **file_list, int file_list_length, double 
 						//Write photon bins to memory
 						int photon_offset = shot_file_num * max_channels * max_tags_length;
 						for (int i = 0; i < photon_bins_length.size(); i++) {
-							memcpy(pinned_photon_bins[gpu] + photon_offset, (photon_bins)[i], (photon_bins_length)[i] * sizeof(long int));
-							cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).photon_bins_gpu + photon_offset, pinned_photon_bins[gpu] + photon_offset, (photon_bins_length)[i] * sizeof(long int), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
+							memcpy(pinned_photon_bins[gpu] + photon_offset, (photon_bins)[i], (photon_bins_length)[i] * sizeof(int32));
+							cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).photon_bins_gpu + photon_offset, pinned_photon_bins[gpu] + photon_offset, (photon_bins_length)[i] * sizeof(int32), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
 							if (cudaStatus != cudaSuccess) {
 								printf("cudaMemcpy photon_bins failed!\n");
 								goto Error;
@@ -1587,8 +1737,8 @@ DLLEXPORT void getG3Correlations(char **file_list, int file_list_length, double 
 
 						int clock_offset = shot_file_num * 2;
 						//And other parameters
-						memcpy(pinned_start_and_end_clocks[gpu] + clock_offset, start_and_end_clocks, 2 * sizeof(long int));
-						cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).start_and_end_clocks_gpu + clock_offset, pinned_start_and_end_clocks[gpu] + clock_offset, 2 * sizeof(long int), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
+						memcpy(pinned_start_and_end_clocks[gpu] + clock_offset, start_and_end_clocks, 2 * sizeof(int32));
+						cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).start_and_end_clocks_gpu + clock_offset, pinned_start_and_end_clocks[gpu] + clock_offset, 2 * sizeof(int32), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
 						if (cudaStatus != cudaSuccess) {
 							printf("cudaMemcpy clock_offset failed!\n");
 							goto Error;
@@ -1597,9 +1747,9 @@ DLLEXPORT void getG3Correlations(char **file_list, int file_list_length, double 
 						int length_offset = shot_file_num * max_channels;
 						//Can't copy vector to cuda easily
 						for (int i = 0; i < photon_bins_length.size(); i++) {
-							memcpy(pinned_photon_bins_length[gpu] + i + length_offset, &((photon_bins_length)[i]), sizeof(int));
+							memcpy(pinned_photon_bins_length[gpu] + i + length_offset, &((photon_bins_length)[i]), sizeof(int32));
 						}
-						cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).photon_bins_length_gpu + length_offset, pinned_photon_bins_length[gpu] + length_offset, max_channels * sizeof(int), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
+						cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).photon_bins_length_gpu + length_offset, pinned_photon_bins_length[gpu] + length_offset, max_channels * sizeof(int32), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
 						if (cudaStatus != cudaSuccess) {
 							printf("cudaMemcpy length_offset failed!\n");
 							goto Error;
@@ -1608,7 +1758,7 @@ DLLEXPORT void getG3Correlations(char **file_list, int file_list_length, double 
 						//Create an event to let us know all the async copies have occured
 						cudaEventRecord(events[gpu][shot_file_num], streams[gpu][shot_file_num]);
 						//Run kernels
-						calculateCoincidencesGPU_g3 << <cuda_blocks_numer, threads_per_cuda_block_numer, 0, streams[gpu][shot_file_num] >> > ((gpu_data[gpu]).coinc_gpu, (gpu_data[gpu]).photon_bins_gpu, (gpu_data[gpu]).start_and_end_clocks_gpu, (gpu_data[gpu]).max_bin_gpu, (gpu_data[gpu]).pulse_spacing_gpu, (gpu_data[gpu]).max_pulse_distance_gpu, (gpu_data[gpu]).offset_gpu, (gpu_data[gpu]).photon_bins_length_gpu, num_channels, shot_file_num);
+						calculateCoincidencesGPU_g3<< <cuda_blocks_numer, threads_per_cuda_block_numer, 0, streams[gpu][shot_file_num] >> > ((gpu_data[gpu]).coinc_gpu, (gpu_data[gpu]).photon_bins_gpu, (gpu_data[gpu]).start_and_end_clocks_gpu, (gpu_data[gpu]).max_bin_gpu, (gpu_data[gpu]).pulse_spacing_gpu, (gpu_data[gpu]).max_pulse_distance_gpu, (gpu_data[gpu]).offset_gpu, (gpu_data[gpu]).photon_bins_length_gpu, num_channels, shot_file_num);
 					}
 				}
 			}
@@ -1652,11 +1802,11 @@ DLLEXPORT void getG3Correlations(char **file_list, int file_list_length, double 
 			printf("cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
 			goto Error;
 		}
-		long int *streamed_coinc;
-		streamed_coinc = (long int *)malloc((((2 * (max_bin)+1) * (2 * (max_bin)+1)) + (max_pulse_distance * 2) * (max_pulse_distance * 2)) * file_block_size * sizeof(long int));
+		int32 *streamed_coinc;
+		streamed_coinc = (int32 *)malloc((((2 * (max_bin)+1) * (2 * (max_bin)+1)) + (max_pulse_distance * 2) * (max_pulse_distance * 2)) * file_block_size * sizeof(int32));
 
 		// Copy output vector from GPU buffer to host memory.
-		cudaStatus = cudaMemcpy(streamed_coinc, (gpu_data[gpu]).coinc_gpu, (((2 * (max_bin)+1) * (2 * (max_bin)+1)) + (max_pulse_distance * 2) * (max_pulse_distance * 2)) * file_block_size * sizeof(long int), cudaMemcpyDeviceToHost);
+		cudaStatus = cudaMemcpy(streamed_coinc, (gpu_data[gpu]).coinc_gpu, (((2 * (max_bin)+1) * (2 * (max_bin)+1)) + (max_pulse_distance * 2) * (max_pulse_distance * 2)) * file_block_size * sizeof(int32), cudaMemcpyDeviceToHost);
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemcpy numerator failed!\n");
 			free(streamed_coinc);
@@ -1712,7 +1862,7 @@ Error:
 	}
 }
 
-DLLEXPORT void getG3Correlations_old(char **file_list, int file_list_length, double max_time, double bin_width, double pulse_spacing, int max_pulse_distance, PyObject *numer, long int *denom) {
+DLLEXPORT void getG3Correlations_old(char **file_list, int file_list_length, double max_time, double bin_width, double pulse_spacing, int max_pulse_distance, PyObject *numer, int32 *denom) {
 	std::vector<char *> filelist(file_list_length);
 	//Grab filename and stick it into filelist vector
 	for (int i = 0; i < file_list_length; i++) {
@@ -1752,8 +1902,8 @@ DLLEXPORT void getG3Correlations_old(char **file_list, int file_list_length, dou
 	cudaError_t cudaStatus;
 
 	//Pointers for our various pinned memory for host-GPU DMA
-	long int* pinned_photon_bins[num_gpu];
-	long int* pinned_start_and_end_clocks[num_gpu];
+	int32* pinned_photon_bins[num_gpu];
+	int32* pinned_start_and_end_clocks[num_gpu];
 	int* pinned_photon_bins_length[num_gpu];
 
 	//Load some stuff to the GPU we will use permenantly
@@ -1768,11 +1918,11 @@ DLLEXPORT void getG3Correlations_old(char **file_list, int file_list_length, dou
 			goto Error;
 		}
 
-		cudaMallocHost((long int**)&pinned_photon_bins[gpu], max_tags_length * max_channels * file_block_size * sizeof(long int));
-		cudaMallocHost((long int**)&pinned_start_and_end_clocks[gpu], 2 * file_block_size * sizeof(long int));
+		cudaMallocHost((int32**)&pinned_photon_bins[gpu], max_tags_length * max_channels * file_block_size * sizeof(int32));
+		cudaMallocHost((int32**)&pinned_start_and_end_clocks[gpu], 2 * file_block_size * sizeof(int32));
 		cudaMallocHost((int**)&pinned_photon_bins_length[gpu], max_channels * file_block_size * sizeof(int));
 
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).photon_bins_gpu), max_channels * max_tags_length * file_block_size * sizeof(long int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).photon_bins_gpu), max_channels * max_tags_length * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc photon_bins_gpu failed\n");
 			printf("%s\n", cudaGetErrorString(cudaStatus));
@@ -1788,12 +1938,12 @@ DLLEXPORT void getG3Correlations_old(char **file_list, int file_list_length, dou
 			printf("cudaMalloc photon_bins_length_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&(gpu_data[gpu].coinc_gpu), (((2 * (max_bin)+1) * (2 * (max_bin)+1)) + (max_pulse_distance * 2) * (max_pulse_distance * 2)) * file_block_size * sizeof(long int));
+		cudaStatus = cudaMalloc((void**)&(gpu_data[gpu].coinc_gpu), (((2 * (max_bin)+1) * (2 * (max_bin)+1)) + (max_pulse_distance * 2) * (max_pulse_distance * 2)) * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc numer_gpu failed!\n");
 			goto Error;
 		}
-		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).start_and_end_clocks_gpu), 2 * file_block_size * sizeof(long int));
+		cudaStatus = cudaMalloc((void**)&((gpu_data[gpu]).start_and_end_clocks_gpu), 2 * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMalloc start_and_end_clocks_gpu failed!\n");
 			goto Error;
@@ -1843,7 +1993,7 @@ DLLEXPORT void getG3Correlations_old(char **file_list, int file_list_length, dou
 		}
 
 		//Set numerator and denominator to 0
-		cudaStatus = cudaMemset(((gpu_data[gpu])).coinc_gpu, 0, (((2 * (max_bin)+1) * (2 * (max_bin)+1)) + (max_pulse_distance * 2) * (max_pulse_distance * 2)) * file_block_size * sizeof(long int));
+		cudaStatus = cudaMemset(((gpu_data[gpu])).coinc_gpu, 0, (((2 * (max_bin)+1) * (2 * (max_bin)+1)) + (max_pulse_distance * 2) * (max_pulse_distance * 2)) * file_block_size * sizeof(int32));
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemset failed!\n");
 			goto Error;
@@ -1924,8 +2074,8 @@ DLLEXPORT void getG3Correlations_old(char **file_list, int file_list_length, dou
 					int num_channels = (shot_block)[block_file_num].channel_list.size();
 					if (num_channels >= 2) {
 
-						std::vector<long int*> photon_bins;
-						long int start_and_end_clocks[2];
+						std::vector<int32*> photon_bins;
+						int32 start_and_end_clocks[2];
 						std::vector<int> photon_bins_length;
 						photon_bins.resize(max_channels);
 						photon_bins_length.resize(max_channels);
@@ -1947,8 +2097,8 @@ DLLEXPORT void getG3Correlations_old(char **file_list, int file_list_length, dou
 						//Write photon bins to memory
 						int photon_offset = shot_file_num * max_channels * max_tags_length;
 						for (int i = 0; i < photon_bins_length.size(); i++) {
-							memcpy(pinned_photon_bins[gpu] + photon_offset, (photon_bins)[i], (photon_bins_length)[i] * sizeof(long int));
-							cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).photon_bins_gpu + photon_offset, pinned_photon_bins[gpu] + photon_offset, (photon_bins_length)[i] * sizeof(long int), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
+							memcpy(pinned_photon_bins[gpu] + photon_offset, (photon_bins)[i], (photon_bins_length)[i] * sizeof(int32));
+							cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).photon_bins_gpu + photon_offset, pinned_photon_bins[gpu] + photon_offset, (photon_bins_length)[i] * sizeof(int32), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
 							if (cudaStatus != cudaSuccess) {
 								printf("cudaMemcpy photon_bins failed!\n");
 								goto Error;
@@ -1958,8 +2108,8 @@ DLLEXPORT void getG3Correlations_old(char **file_list, int file_list_length, dou
 
 						int clock_offset = shot_file_num * 2;
 						//And other parameters
-						memcpy(pinned_start_and_end_clocks[gpu] + clock_offset, start_and_end_clocks, 2 * sizeof(long int));
-						cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).start_and_end_clocks_gpu + clock_offset, pinned_start_and_end_clocks[gpu] + clock_offset, 2 * sizeof(long int), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
+						memcpy(pinned_start_and_end_clocks[gpu] + clock_offset, start_and_end_clocks, 2 * sizeof(int32));
+						cudaStatus = cudaMemcpyAsync((gpu_data[gpu]).start_and_end_clocks_gpu + clock_offset, pinned_start_and_end_clocks[gpu] + clock_offset, 2 * sizeof(int32), cudaMemcpyHostToDevice, streams[gpu][shot_file_num]);
 						if (cudaStatus != cudaSuccess) {
 							printf("cudaMemcpy clock_offset failed!\n");
 							goto Error;
@@ -2023,11 +2173,11 @@ DLLEXPORT void getG3Correlations_old(char **file_list, int file_list_length, dou
 			printf("cudaSetDevice failed!  Do you have a CUDA-capable GPU installed?");
 			goto Error;
 		}
-		long int *streamed_coinc;
-		streamed_coinc = (long int *)malloc((((2 * (max_bin)+1) * (2 * (max_bin)+1)) + (max_pulse_distance * 2) * (max_pulse_distance * 2)) * file_block_size * sizeof(long int));
+		int32 *streamed_coinc;
+		streamed_coinc = (int32 *)malloc((((2 * (max_bin)+1) * (2 * (max_bin)+1)) + (max_pulse_distance * 2) * (max_pulse_distance * 2)) * file_block_size * sizeof(int32));
 
 		// Copy output vector from GPU buffer to host memory.
-		cudaStatus = cudaMemcpy(streamed_coinc, (gpu_data[gpu]).coinc_gpu, (((2 * (max_bin)+1) * (2 * (max_bin)+1)) + (max_pulse_distance * 2) * (max_pulse_distance * 2)) * file_block_size * sizeof(long int), cudaMemcpyDeviceToHost);
+		cudaStatus = cudaMemcpy(streamed_coinc, (gpu_data[gpu]).coinc_gpu, (((2 * (max_bin)+1) * (2 * (max_bin)+1)) + (max_pulse_distance * 2) * (max_pulse_distance * 2)) * file_block_size * sizeof(int32), cudaMemcpyDeviceToHost);
 		if (cudaStatus != cudaSuccess) {
 			printf("cudaMemcpy numerator failed!\n");
 			free(streamed_coinc);
