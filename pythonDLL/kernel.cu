@@ -475,6 +475,46 @@ __global__ void calculateCoincidencesGPU_g3(int32 *coinc, int32 *photon_bins, in
 	}
 }
 
+void calculateCoincidencesGPU_g2_cpu(shotData *shot_data, int32 id, int32 *max_bin, int32 *pulse_spacing, int32 *max_pulse_distance, int32 *coinc, int32 shot_file_num) {
+	
+	if (id < ((*max_bin * 2 + 1) + (*max_pulse_distance * 2))) {
+		int32 pulse_shift_measurment = (id >= *max_bin * 2 + 1) && (id < *max_bin * 2 + 1 + (*max_pulse_distance * 2));
+		int32 pulse_shift = ((id - (*max_bin * 2 + 1) - (*max_pulse_distance)) + ((id - (*max_bin * 2 + 1) - (*max_pulse_distance)) >= 0)) * (pulse_shift_measurment);
+		int32 tau = (id - (*max_bin)) * (!pulse_shift_measurment);
+		tau += pulse_shift * (*pulse_spacing);
+
+		int32 start_clock = shot_data->sorted_clock_bins[1][0];
+		int32 end_clock = shot_data->sorted_clock_bins[0][0];
+
+		for (int channel_1 = 0; channel_1 < shot_data->channel_list.size(); channel_1++) {
+			for (int channel_2 = channel_1 + 1; channel_2 < shot_data->channel_list.size(); channel_2++) {
+
+				int i = 0;
+				int j = 0;
+				int running_tot = 0;
+
+				while ((i < shot_data->sorted_photon_tag_pointers[channel_1]) && (j < shot_data->sorted_photon_tag_pointers[channel_2])) {
+
+					//Check if we're outside the window of interest
+					int out_window = (shot_data->sorted_photon_bins[channel_1][i] < (*max_bin + *max_pulse_distance * *pulse_spacing + start_clock)) || (shot_data->sorted_photon_bins[channel_1][i] > (end_clock - (*max_bin + *max_pulse_distance * *pulse_spacing)));
+					//chan_1 > chan_2
+					int c1gc2 = shot_data->sorted_photon_bins[channel_1][i] > (shot_data->sorted_photon_bins[channel_2][j] - tau);
+					//Check if we have a common element increment
+					int c1ec2 = shot_data->sorted_photon_bins[channel_1][i] == (shot_data->sorted_photon_bins[channel_2][j] - tau);
+					//Increment running total if channel 1 equals channel 2
+					running_tot += !out_window && c1ec2;
+					//Increment channel 1 if it is greater than channel 2, equal to channel 2 or ouside of the window
+					i += (!c1gc2 || out_window);
+					j += (c1gc2 || c1ec2);
+
+				}
+				coinc[id + shot_file_num * ((*max_bin * 2 + 1) + (*max_pulse_distance * 2))] += running_tot;
+				//coinc[id + shot_file_num * ((*max_bin * 2 + 1) + (*max_pulse_distance * 2))] = tau;
+			}
+		}
+	}
+}
+
 //Function grabs all tags and channel list from file
 void fileToShotData(shotData *shot_data, char* filename) {
 	//Open up file
@@ -1488,6 +1528,80 @@ Error:
 		cudaFreeHost(pinned_start_and_end_clocks[gpu]);
 		cudaDeviceReset();
 	}
+}
+
+DLLEXPORT void getG2Correlations_cpu(char **file_list, int file_list_length, double max_time, double bin_width, double pulse_spacing, int max_pulse_distance, PyObject *numer, int32 *denom, int num_cpu_threads) {
+
+
+	std::vector<char *> filelist(file_list_length);
+	//Grab filename and stick it into filelist vector
+	for (int i = 0; i < file_list_length; i++) {
+		filelist[i] = file_list[i];
+	}
+
+	int max_bin = (int)round(max_time / bin_width);
+	int bin_pulse_spacing = (int)round(pulse_spacing / bin_width);
+
+	int32 *coinc;
+	coinc = (int32*)malloc(((2 * (max_bin)+1) + (max_pulse_distance * 2)) * num_cpu_threads * sizeof(int32));
+
+	for (int id = 0; id < ((2 * (max_bin)+1) + (max_pulse_distance * 2)) * num_cpu_threads; id++) {
+		coinc[id] = 0;
+	}
+
+	int blocks_req;
+	if (file_list_length < (num_cpu_threads)) {
+		blocks_req = 1;
+	}
+	else if ((file_list_length % (num_cpu_threads)) == 0) {
+		blocks_req = file_list_length / (num_cpu_threads);
+	}
+	else {
+		blocks_req = file_list_length / (num_cpu_threads) + 1;
+	}
+
+	printf("Chunking %i files into %i blocks\n", file_list_length, blocks_req);
+	printf("Max Time\tBin Width\tPulse Spacing\tMax Pulse Distance\n");
+	printf("%fus\t%fns\t%fus\t%i\n", max_time * 1e6, bin_width * 1e9, pulse_spacing * 1e6, max_pulse_distance);
+
+	//Processes files in blocks
+	for (int block_num = 0; block_num < blocks_req; block_num++) {
+		//Allocate a vector to hold a block of shot_data
+		std::vector<shotData> shot_block(num_cpu_threads);
+
+		//Populate the shot_block with data from file
+		populateBlock(&shot_block, &filelist, block_num, 1, num_cpu_threads);
+
+		//Sort tags and convert them to bins
+		sortAndBinBlock(&shot_block, bin_width, 1, num_cpu_threads);
+
+		//Processes files
+		#pragma omp parallel for num_threads(num_cpu_threads)
+		for (int shot_file_num = 0; shot_file_num < num_cpu_threads; shot_file_num++) {
+			if ((shot_block)[shot_file_num].file_load_completed) {
+
+				#pragma omp parallel for
+				for (int32 id = 0; id < (2 * (max_bin)+1) + (max_pulse_distance * 2); id++) {
+					calculateCoincidencesGPU_g2_cpu(&(shot_block[shot_file_num]), id, &max_bin, &bin_pulse_spacing, &max_pulse_distance, coinc, shot_file_num);
+				}
+			}
+		}
+
+	}
+
+	//Collapse streamed coincidence counts down to regular numerator and denominator
+	for (int i = 0; i < num_cpu_threads; i++) {
+		for (int j = 0; j < ((2 * (max_bin)+1) + (max_pulse_distance * 2)); j++) {
+			if (j < (2 * (max_bin)+1)) {
+				PyList_SetItem(numer, j, PyLong_FromLong(PyLong_AsLong(PyList_GetItem(numer, j)) + coinc[j + i * ((2 * (max_bin)+1) + (max_pulse_distance * 2))]));
+			}
+			else {
+				denom[0] += coinc[j + i * ((2 * (max_bin)+1) + (max_pulse_distance * 2))];
+			}
+		}
+	}
+	free(coinc);
+
 }
 
 DLLEXPORT void getG3Correlations(char **file_list, int file_list_length, double max_time, double bin_width, double pulse_spacing, int max_pulse_distance, PyObject *numer, int32 *denom) {
